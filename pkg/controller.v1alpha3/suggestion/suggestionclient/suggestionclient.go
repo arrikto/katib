@@ -2,14 +2,17 @@ package suggestionclient
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"time"
 
+	"github.com/pkg/errors"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"k8s.io/apimachinery/pkg/types"
-	utilrand "k8s.io/apimachinery/pkg/util/rand"
 	logf "sigs.k8s.io/controller-runtime/pkg/runtime/log"
 
 	commonapiv1alpha3 "github.com/kubeflow/katib/pkg/apis/controller/common/v1alpha3"
@@ -76,28 +79,19 @@ func (g *General) SyncAssignments(
 		Trials:        g.ConvertTrials(ts),
 		RequestNumber: int32(requestNum),
 	}
-	response, err := client.GetSuggestions(ctx, request)
+	logger.V(0).Info("Getting suggestions", "endpoint", endpoint, "request", request)
+	trialAssignments, err := getNewTrialAssignments(instance, client, ctx, request)
 	if err != nil {
 		return err
 	}
-	logger.V(0).Info("Getting suggestions", "endpoint", endpoint, "response", response, "request", request)
-	if len(response.ParameterAssignments) != requestNum {
+	if len(trialAssignments) != requestNum {
 		err := fmt.Errorf("The response contains unexpected trials")
-		logger.Error(err, "The response contains unexpected trials", "requestNum", requestNum, "response", response)
+		logger.Error(err, "The response contains unexpected trials", "requestNum", requestNum, "trialAssignments", trialAssignments)
 		return err
 	}
-	for _, t := range response.ParameterAssignments {
-		instance.Status.Suggestions = append(instance.Status.Suggestions,
-			suggestionsv1alpha3.TrialAssignment{
-				Name:                 fmt.Sprintf("%s-%s", instance.Name, utilrand.String(8)),
-				ParameterAssignments: composeParameterAssignments(t.Assignments),
-			})
-	}
+	instance.Status.Suggestions = append(instance.Status.Suggestions, trialAssignments...)
 	instance.Status.SuggestionCount = int32(len(instance.Status.Suggestions))
 
-	if response.Algorithm != nil {
-		updateAlgorithmSettings(instance, response.Algorithm)
-	}
 	return nil
 }
 
@@ -354,4 +348,75 @@ func convertFeasibleSpace(fs experimentsv1alpha3.FeasibleSpace) *suggestionapi.F
 		Step: fs.Step,
 	}
 	return res
+}
+
+func getNewTrialAssignments(
+	suggestion *suggestionsv1alpha3.Suggestion,
+	client suggestionapi.SuggestionClient,
+	ctx context.Context,
+	request *suggestionapi.GetSuggestionsRequest,
+) ([]suggestionsv1alpha3.TrialAssignment, error) {
+	var response *suggestionapi.GetSuggestionsReply
+	var newTrialAssignments []suggestionsv1alpha3.TrialAssignment
+
+	for {
+		var err error
+		response, err = client.GetSuggestions(ctx, request)
+		if err != nil {
+			return nil, err
+		}
+		if len(response.ParameterAssignments) == 0 {
+			break
+		}
+		for _, t := range response.ParameterAssignments {
+			parameterAssignments := composeParameterAssignments(t.Assignments)
+			digest, err := hashParameterAssignments(parameterAssignments)
+			if err != nil {
+				return nil, errors.Wrapf(err, "Failed to get parameter assignments digest")
+			}
+			hash := digest
+			if len(hash) > 8 {
+				hash = hash[:8]
+			}
+			trialAssignment := suggestionsv1alpha3.TrialAssignment{
+				Name:                 fmt.Sprintf("%s-%s", suggestion.Name, hash),
+				ParameterAssignments: parameterAssignments,
+			}
+			newAssignment := true
+			for _, s := range suggestion.Status.Suggestions {
+				if s.Name == trialAssignment.Name {
+					newAssignment = false
+					break
+				}
+			}
+			if newAssignment {
+				newTrialAssignments = append(newTrialAssignments, trialAssignment)
+			}
+		}
+		if len(newTrialAssignments) > 0 {
+			break
+		}
+	}
+
+	if response.Algorithm != nil {
+		updateAlgorithmSettings(suggestion, response.Algorithm)
+	}
+	return newTrialAssignments, nil
+}
+
+func hashParameterAssignments(parameterAssignments []commonapiv1alpha3.ParameterAssignment) (string, error) {
+	b, err := json.Marshal(parameterAssignments)
+	if err != nil {
+		return "", errors.Wrapf(err, "Failed to marshal parameter assignments: %v", parameterAssignments)
+	}
+	return hashBytes(b)
+}
+
+func hashBytes(b []byte) (string, error) {
+	hash := sha256.New()
+	_, err := hash.Write(b)
+	if err != nil {
+		return "", errors.Wrapf(err, "Failed to hash '%s'", b)
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
 }

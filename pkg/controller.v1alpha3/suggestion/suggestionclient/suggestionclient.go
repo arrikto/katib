@@ -84,13 +84,18 @@ func (g *General) SyncAssignments(
 	if err != nil {
 		return err
 	}
-	if len(trialAssignments) != requestNum {
-		err := fmt.Errorf("The response contains unexpected trials")
-		logger.Error(err, "The response contains unexpected trials", "requestNum", requestNum, "trialAssignments", trialAssignments)
-		return err
-	}
 	instance.Status.Suggestions = append(instance.Status.Suggestions, trialAssignments...)
 	instance.Status.SuggestionCount = int32(len(instance.Status.Suggestions))
+
+	if len(trialAssignments) != requestNum {
+		logger.Error(
+			err,
+			"The response contains unexpected trials",
+			"requestNum", requestNum,
+			"trialAssignmentsNum", len(trialAssignments),
+			"trialAssignments", trialAssignments,
+		)
+	}
 
 	return nil
 }

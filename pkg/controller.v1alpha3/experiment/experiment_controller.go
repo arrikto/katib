@@ -380,13 +380,11 @@ func (r *ReconcileExperiment) ReconcileSuggestions(instance *experimentsv1alpha3
 			activeTrials := instance.Status.TrialsPending + instance.Status.TrialsRunning
 			// If Suggestion is in failed/exhausted state, wait for active trials and use all produced suggestions
 			if (original.IsFailed() || original.IsExhausted()) && activeTrials == 0 && len(original.Status.Suggestions) == int(currentCount) {
-				var msg string
 				if original.IsFailed() {
-					msg = "Suggestion has failed"
+					instance.MarkExperimentStatusFailed(util.ExperimentFailedReason, "Suggestion has failed")
 				} else {
-					msg = "Suggestion is exhausted"
+					instance.MarkExperimentStatusFailed(util.ExperimentSuggestionEndReachedReason, "Suggestion is exhausted")
 				}
-				instance.MarkExperimentStatusFailed(util.ExperimentFailedReason, msg)
 			} else {
 				suggestion := original.DeepCopy()
 				if len(suggestion.Status.Suggestions) > int(currentCount) {
